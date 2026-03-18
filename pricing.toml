@@ -1,0 +1,18 @@
+# Pricing Configuration for batch-cost
+# AWS Fargate on-demand prices (eu-central-1, 2024)
+
+[pricing]
+# Price per vCPU per hour (in USD)
+price_vcpu_hour = 0.04048
+
+# Price per GB of memory per hour (in USD)
+price_gb_hour = 0.004445
+
+# Example for other regions:
+# [pricing.us-east-1]
+# price_vcpu_hour = 0.04048
+# price_gb_hour = 0.004445
+
+# [pricing.eu-west-1]
+# price_vcpu_hour = 0.04048
+# price_gb_hour = 0.004445

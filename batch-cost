@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+source "$SCRIPT_DIR/lib/output.sh"
+source "$SCRIPT_DIR/lib/pricing.sh"
+
+# --- Config ---
+AWS_REGION="${AWS_REGION:-eu-central-1}"
+PROVIDER="${PROVIDER:-aws}"
+JSON_OUTPUT=0
+
+# --- Dependency Check ---
+check_deps() {
+  for dep in aws jq bc; do
+    command -v "$dep" &>/dev/null || err "$dep ist nicht installiert"
+  done
+  command -v gum &>/dev/null || warn "gum nicht gefunden — plain output"
+}
+
+# --- Provider laden ---
+load_provider() {
+  local p="$SCRIPT_DIR/providers/${PROVIDER}.sh"
+  [[ -f "$p" ]] || err "Provider nicht gefunden: $PROVIDER ($p)"
+  source "$p"
+}
+
+# --- Flags ---
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)         JSON_OUTPUT=1 ;;
+      --profile)      export AWS_PROFILE="$2"; shift ;;
+      --region)       export AWS_REGION="$2"; shift ;;
+      --provider)     PROVIDER="$2"; shift ;;
+      --job-id)       MODE="estimate"; JOB_ID="$2"; shift ;;
+      --job-name)     MODE="explorer"; JOB_NAME="$2"; shift ;;
+      -h|--help)      usage; exit 0 ;;
+      *)              err "Unbekanntes Flag: $1" ;;
+    esac
+    shift
+  done
+}
+
+usage() {
+  cat <<EOF
+Usage: batch-cost [OPTIONS]
+
+Options:
+  --job-id    <id>      Kosten schätzen (Mode 1)
+  --job-name  <name>    Echte Kosten via Cost Explorer (Mode 2)
+  --provider  <name>    Cloud Provider (default: aws)
+  --profile   <name>    AWS Profil
+  --region    <region>  AWS Region (default: eu-central-1)
+  --json                JSON Output
+  -h, --help            Hilfe
+
+Umgebungsvariablen:
+  AWS_REGION            (default: eu-central-1)
+  PRICE_PER_VCPU_HOUR   (default: 0.04048)
+  PRICE_PER_GB_HOUR     (default: 0.004445)
+EOF
+}
+
+# --- Mode 1: Estimate ---
+mode_estimate() {
+  local job_id="${JOB_ID:-}"
+
+  if [[ -z "$job_id" && "$GUM_AVAILABLE" -eq 1 ]]; then
+    job_id=$(gum input --placeholder "AWS Batch Job ID eingeben...")
+  fi
+  [[ -z "$job_id" ]] && err "Job ID fehlt (--job-id oder interaktiv)"
+
+  local job_data
+  job_data=$(aws_describe_job "$job_id")
+
+  local duration_sec vcpu memory_mb status in_progress
+  duration_sec=$(echo "$job_data" | jq -r '.duration_sec')
+  vcpu=$(echo "$job_data" | jq -r '.vcpu')
+  memory_mb=$(echo "$job_data" | jq -r '.memory_mb')
+  status=$(echo "$job_data" | jq -r '.status')
+  in_progress=$(echo "$job_data" | jq -r '.in_progress')
+
+  # Kosten berechnen
+  local costs cpu_cost mem_cost total
+  mapfile -t costs < <(calc_cost "$duration_sec" "$vcpu" "$memory_mb")
+  cpu_cost="${costs[0]}"
+  mem_cost="${costs[1]}"
+  total="${costs[2]}"
+
+  local duration_fmt
+  duration_fmt=$(format_duration "$duration_sec")
+  local duration_h
+  duration_h=$(echo "scale=4; $duration_sec / 3600" | bc)
+
+  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+    echo "$job_data" | jq \
+      --arg cpu_cost "$cpu_cost" \
+      --arg mem_cost "$mem_cost" \
+      --arg total    "$total" \
+      '. + {cpu_cost: $cpu_cost, mem_cost: $mem_cost, total_cost: $total}'
+    return
+  fi
+
+  # Pretty Output
+  echo ""
+  header "Batch Job Cost Report"
+  echo ""
+  label "Job ID"   "$(echo "$job_data" | jq -r '.job_id')"
+  label "Job Name" "$(echo "$job_data" | jq -r '.job_name')"
+  label "Status"   "$status"
+  [[ "$in_progress" == "1" ]] && warn "Job läuft noch — laufende Schätzung"
+  label "Duration" "${duration_sec}s (${duration_h}h)  →  ${duration_fmt}"
+  label "vCPU"     "$vcpu"
+  label "Memory"   "${memory_mb} MB"
+  separator
+  echo ""
+
+  if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
+    gum style --bold "--- Estimate (${PROVIDER}) ---"
+  else
+    echo "--- Estimate (${PROVIDER}) ---"
+  fi
+  echo ""
+  cost_line "CPU Cost"    "$cpu_cost"
+  cost_line "Memory Cost" "$mem_cost"
+  separator
+  cost_line "Total"       "$total"
+  echo ""
+}
+
+# --- Mode 2: Cost Explorer ---
+mode_explorer() {
+  local job_name="${JOB_NAME:-}"
+
+  if [[ -z "$job_name" && "$GUM_AVAILABLE" -eq 1 ]]; then
+    job_name=$(gum input --placeholder "Job Name (Tag: BatchJob=<name>)...")
+  fi
+  [[ -z "$job_name" ]] && err "Job Name fehlt (--job-name oder interaktiv)"
+
+  local result
+  result=$(aws_cost_explorer "$job_name")
+
+  local amount unit period_start period_end
+  amount=$(echo "$result" | jq -r '.amount')
+  unit=$(echo "$result" | jq -r '.unit')
+  period_start=$(echo "$result" | jq -r '.period_start')
+  period_end=$(echo "$result" | jq -r '.period_end')
+
+  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+    echo "$result"
+    return
+  fi
+
+  echo ""
+  header "Cost Explorer Report"
+  echo ""
+  label "Job Tag"  "BatchJob=$job_name"
+  label "Period"   "${period_start} → ${period_end}"
+  separator
+  cost_line "Real Cost ($unit)" "$(LC_NUMERIC=C printf '%.4f' "$amount")"
+  echo ""
+  warn "Cost Explorer hat 24h Verzögerung und benötigt den Tag BatchJob=$job_name"
+  echo ""
+}
+
+# --- Interaktiver Modus (kein Argument) ---
+interactive_mode() {
+  [[ "$GUM_AVAILABLE" -eq 0 ]] && err "Kein Argument angegeben. Nutze --job-id oder --job-name"
+
+  local choice
+  choice=$(gum choose \
+    "Estimate cost from Job ID" \
+    "Get real cost via Cost Explorer")
+
+  case "$choice" in
+    "Estimate"*)  MODE="estimate" ;;
+    "Get real"*)  MODE="explorer" ;;
+    *)            exit 0 ;;
+  esac
+}
+
+# --- Main ---
+MODE="" JOB_ID="" JOB_NAME=""
+
+check_deps
+parse_args "$@"
+load_provider
+
+if [[ -z "$MODE" ]]; then
+  interactive_mode
+fi
+
+case "$MODE" in
+  estimate) mode_estimate ;;
+  explorer) mode_explorer ;;
+  *)        usage; exit 1 ;;
+esac
