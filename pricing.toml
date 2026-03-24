@@ -1,7 +1,7 @@
 [pricing]
 price_vcpu_hour = 0.04048
 price_gb_hour = 0.004445
-use_pricing_api = false
+use_pricing_api = true
 cache_ttl_minutes = 60
 
 [cache]
