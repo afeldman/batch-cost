@@ -25,5 +25,7 @@ type CostInfo struct {
 type Provider interface {
     DescribeJob(ctx context.Context, jobID string) (*JobInfo, error)
     GetRealCost(ctx context.Context, jobName string) (*CostInfo, error)
+    ListJobs(ctx context.Context, queue string, statuses []string, limit int) ([]string, error)
+    AutoDiscoverQueue(ctx context.Context) (string, error)
     Name() string
 }

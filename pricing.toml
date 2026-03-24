@@ -1,18 +1,21 @@
-# Pricing Configuration for batch-cost
-# AWS Fargate on-demand prices (eu-central-1, 2024)
-
 [pricing]
-# Price per vCPU per hour (in USD)
 price_vcpu_hour = 0.04048
-
-# Price per GB of memory per hour (in USD)
 price_gb_hour = 0.004445
+use_pricing_api = false
+cache_ttl_minutes = 60
 
-# Example for other regions:
-# [pricing.us-east-1]
-# price_vcpu_hour = 0.04048
-# price_gb_hour = 0.004445
+[cache]
+dir = "~/.cache/batch-cost"
 
-# [pricing.eu-west-1]
-# price_vcpu_hour = 0.04048
-# price_gb_hour = 0.004445
+[llm]
+enabled = true
+endpoint = "http://localhost:1234/v1"
+model = "mistralai/ministral-3-3b"
+api_key = "lm-studio"
+timeout_s = 30
+
+[llm.local]
+enabled = false
+model_repo = "noeum/noeum-1-nano-base"
+port = 2510
+config_dir = ""

@@ -1,199 +1,242 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+set -euo pipefail 
 
-source "$SCRIPT_DIR/lib/output.sh"
-source "$SCRIPT_DIR/lib/pricing.sh"
+export LC_NUMERIC=C 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" 
+JOB_QUEUE="${JOB_QUEUE:-}"
+if [[ -z "${JOB_QUEUE:-}" ]]; then
+  JOB_QUEUE=$(aws batch describe-job-queues \
+    --query 'jobQueues[0].jobQueueName' \
+    --output text 2>/dev/null)
 
-# --- Config ---
-AWS_REGION="${AWS_REGION:-eu-central-1}"
-PROVIDER="${PROVIDER:-aws}"
-JSON_OUTPUT=0
+  [[ -z "$JOB_QUEUE" || "$JOB_QUEUE" == "None" ]] && \
+    err "Keine Batch Queue gefunden"
+fi
 
-# --- Dependency Check ---
-check_deps() {
-  for dep in aws jq bc; do
-    command -v "$dep" &>/dev/null || err "$dep ist nicht installiert"
-  done
-  command -v gum &>/dev/null || warn "gum nicht gefunden — plain output"
+# debug optional
+echo "SCRIPT_DIR=$SCRIPT_DIR" 
+
+source "$SCRIPT_DIR/lib/output.sh" || exit 1 
+source "$SCRIPT_DIR/lib/pricing.sh" || exit 1 
+source "$SCRIPT_DIR/lib/validate.sh" || exit 1 
+source "$SCRIPT_DIR/lib/batch-cost.sh" || exit 1 
+source "$SCRIPT_DIR/providers/aws.sh" || exit 1 
+
+echo "load pricing..." 
+load_pricing 
+echo "pricing loaded: vCPU \$$PRICE_PER_VCPU_HOUR / GB \$$PRICE_PER_GB_HOUR"
+
+format_float() {
+  local val="$1"
+  [[ "$val" =~ ^\..* ]] && val="0$val"
+  LC_NUMERIC=C printf "%.4f" "$val"
 }
 
-# --- Provider laden ---
-load_provider() {
-  local p="$SCRIPT_DIR/providers/${PROVIDER}.sh"
-  [[ -f "$p" ]] || err "Provider nicht gefunden: $PROVIDER ($p)"
-  source "$p"
+calc_cost_with_prices() {
+  local duration="$1"
+  local vcpu="$2"
+  local memory="$3"
+  local cpu_price="$4"
+  local mem_price="$5"
+
+  local duration_h memory_gb
+
+  duration_h=$(echo "scale=6; $duration / 3600" | bc)
+  memory_gb=$(echo "scale=6; $memory / 1024" | bc)
+
+  local cpu_cost mem_cost total
+
+  cpu_cost=$(echo "$vcpu * $duration_h * $cpu_price" | bc)
+  mem_cost=$(echo "$memory_gb * $duration_h * $mem_price" | bc)
+  total=$(echo "$cpu_cost + $mem_cost" | bc)
+
+  echo "$total"
 }
 
-# --- Flags ---
-parse_args() {
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --json)         JSON_OUTPUT=1 ;;
-      --profile)      export AWS_PROFILE="$2"; shift ;;
-      --region)       export AWS_REGION="$2"; shift ;;
-      --provider)     PROVIDER="$2"; shift ;;
-      --job-id)       MODE="estimate"; JOB_ID="$2"; shift ;;
-      --job-name)     MODE="explorer"; JOB_NAME="$2"; shift ;;
-      -h|--help)      usage; exit 0 ;;
-      *)              err "Unbekanntes Flag: $1" ;;
-    esac
-    shift
-  done
+aws_list_jobs() {
+  aws batch list-jobs \
+    --job-queue "$JOB_QUEUE" \
+    --job-status SUCCEEDED \
+    --max-items "$1" \
+    --output json | \
+  jq -r '.jobSummaryList[].jobId'
 }
 
-usage() {
-  cat <<EOF
-Usage: batch-cost [OPTIONS]
-
-Options:
-  --job-id    <id>      Kosten schätzen (Mode 1)
-  --job-name  <name>    Echte Kosten via Cost Explorer (Mode 2)
-  --provider  <name>    Cloud Provider (default: aws)
-  --profile   <name>    AWS Profil
-  --region    <region>  AWS Region (default: eu-central-1)
-  --json                JSON Output
-  -h, --help            Hilfe
-
-Umgebungsvariablen:
-  AWS_REGION            (default: eu-central-1)
-  PRICE_PER_VCPU_HOUR   (default: 0.04048)
-  PRICE_PER_GB_HOUR     (default: 0.004445)
-EOF
-}
-
-# --- Mode 1: Estimate ---
 mode_estimate() {
-  local job_id="${JOB_ID:-}"
-
-  if [[ -z "$job_id" && "$GUM_AVAILABLE" -eq 1 ]]; then
-    job_id=$(gum input --placeholder "AWS Batch Job ID eingeben...")
-  fi
-  [[ -z "$job_id" ]] && err "Job ID fehlt (--job-id oder interaktiv)"
+  local job_id="$1"
 
   local job_data
   job_data=$(aws_describe_job "$job_id")
 
-  local duration_sec vcpu memory_mb status in_progress
+  local duration_sec vcpu memory_mb status
   duration_sec=$(echo "$job_data" | jq -r '.duration_sec')
   vcpu=$(echo "$job_data" | jq -r '.vcpu')
   memory_mb=$(echo "$job_data" | jq -r '.memory_mb')
   status=$(echo "$job_data" | jq -r '.status')
-  in_progress=$(echo "$job_data" | jq -r '.in_progress')
 
-  # Kosten berechnen
-  local costs cpu_cost mem_cost total
-  mapfile -t costs < <(calc_cost "$duration_sec" "$vcpu" "$memory_mb")
-  cpu_cost="${costs[0]}"
-  mem_cost="${costs[1]}"
-  total="${costs[2]}"
+  validate_number "duration" "$duration_sec"
+  validate_number "vcpu" "$vcpu"
+  validate_number "memory_mb" "$memory_mb"
 
-  local duration_fmt
-  duration_fmt=$(format_duration "$duration_sec")
-  local duration_h
-  duration_h=$(echo "scale=4; $duration_sec / 3600" | bc)
+  duration_sec=$(sanitize_duration "$duration_sec")
 
-  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
-    echo "$job_data" | jq \
-      --arg cpu_cost "$cpu_cost" \
-      --arg mem_cost "$mem_cost" \
-      --arg total    "$total" \
-      '. + {cpu_cost: $cpu_cost, mem_cost: $mem_cost, total_cost: $total}'
-    return
-  fi
+  IFS="|" read -r cpu_cost mem_cost total cost_per_hour \
+    <<< "$(calc_cost_raw "$duration_sec" "$vcpu" "$memory_mb")"
 
-  # Pretty Output
-  echo ""
-  header "Batch Job Cost Report"
-  echo ""
-  label "Job ID"   "$(echo "$job_data" | jq -r '.job_id')"
-  label "Job Name" "$(echo "$job_data" | jq -r '.job_name')"
-  label "Status"   "$status"
-  [[ "$in_progress" == "1" ]] && warn "Job läuft noch — laufende Schätzung"
-  label "Duration" "${duration_sec}s (${duration_h}h)  →  ${duration_fmt}"
-  label "vCPU"     "$vcpu"
-  label "Memory"   "${memory_mb} MB"
-  separator
-  echo ""
+  # --- Drift ---
+  static_total=$(calc_cost_with_prices \
+    "$duration_sec" "$vcpu" "$memory_mb" \
+    "$DEFAULT_VCPU_PRICE" "$DEFAULT_GB_PRICE")
 
-  if [[ "$GUM_AVAILABLE" -eq 1 ]]; then
-    gum style --bold "--- Estimate (${PROVIDER}) ---"
+  live_total="$total"
+  delta=$(echo "$live_total - $static_total" | bc)
+
+  if (( $(echo "$static_total > 0" | bc -l) )); then
+    delta_pct=$(echo "scale=2; ($delta / $static_total) * 100" | bc)
   else
-    echo "--- Estimate (${PROVIDER}) ---"
+    delta_pct=0
   fi
+
+  # --- Format ---
+  cpu_cost_fmt=$(format_float "$cpu_cost")
+  mem_cost_fmt=$(format_float "$mem_cost")
+  total_fmt=$(format_float "$total")
+  cph_fmt=$(format_float "$cost_per_hour")
+
+  static_fmt=$(format_float "$static_total")
+  live_fmt=$(format_float "$live_total")
+  delta_fmt=$(format_float "$delta")
+
+  # --- Insights ---
+  if (( $(echo "$total == 0" | bc -l) )); then
+    cpu_pct=0
+    mem_pct=0
+  else
+    cpu_pct=$(echo "scale=2; $cpu_cost / $total * 100" | bc)
+    mem_pct=$(echo "scale=2; $mem_cost / $total * 100" | bc)
+  fi
+
   echo ""
-  cost_line "CPU Cost"    "$cpu_cost"
-  cost_line "Memory Cost" "$mem_cost"
+  header "Batch Cost v2"
+  echo ""
+
+  label "Pricing Source" "$PRICING_SOURCE"
+  label "Job ID" "$job_id"
+  label "Status" "$status"
+  label "Duration" "$(format_duration "$duration_sec")"
+  label "vCPU" "$vcpu"
+  label "Memory" "$memory_mb MB"
+
   separator
-  cost_line "Total"       "$total"
-  echo ""
-}
 
-# --- Mode 2: Cost Explorer ---
-mode_explorer() {
-  local job_name="${JOB_NAME:-}"
+  cost_line "CPU Cost" "$cpu_cost_fmt"
+  cost_line "Memory Cost" "$mem_cost_fmt"
+  cost_line "Total" "$total_fmt"
 
-  if [[ -z "$job_name" && "$GUM_AVAILABLE" -eq 1 ]]; then
-    job_name=$(gum input --placeholder "Job Name (Tag: BatchJob=<name>)...")
-  fi
-  [[ -z "$job_name" ]] && err "Job Name fehlt (--job-name oder interaktiv)"
-
-  local result
-  result=$(aws_cost_explorer "$job_name")
-
-  local amount unit period_start period_end
-  amount=$(echo "$result" | jq -r '.amount')
-  unit=$(echo "$result" | jq -r '.unit')
-  period_start=$(echo "$result" | jq -r '.period_start')
-  period_end=$(echo "$result" | jq -r '.period_end')
-
-  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
-    echo "$result"
-    return
-  fi
-
-  echo ""
-  header "Cost Explorer Report"
-  echo ""
-  label "Job Tag"  "BatchJob=$job_name"
-  label "Period"   "${period_start} → ${period_end}"
   separator
-  cost_line "Real Cost ($unit)" "$(LC_NUMERIC=C printf '%.4f' "$amount")"
+
+  label "Cost / Hour" "\$$cph_fmt"
+  label "CPU %" "$cpu_pct%"
+  label "Memory %" "$mem_pct%"
+
+  separator
+  label "Static Cost" "\$$static_fmt"
+  label "Live Cost"   "\$$live_fmt"
+  label "Delta"       "$(color_delta "$delta_fmt" "$delta_pct")"
+
   echo ""
-  warn "Cost Explorer hat 24h Verzögerung und benötigt den Tag BatchJob=$job_name"
+
+  if (( $(echo "$cpu_pct > 70" | bc -l) )); then
+    warn "CPU dominiert → evtl. overprovisioned"
+  fi
+
+  if (( $(echo "$mem_pct > 70" | bc -l) )); then
+    warn "Memory dominiert → evtl. RAM zu hoch"
+  fi
+
   echo ""
 }
 
-# --- Interaktiver Modus (kein Argument) ---
-interactive_mode() {
-  [[ "$GUM_AVAILABLE" -eq 0 ]] && err "Kein Argument angegeben. Nutze --job-id oder --job-name"
 
-  local choice
-  choice=$(gum choose \
-    "Estimate cost from Job ID" \
-    "Get real cost via Cost Explorer")
+mode_multi() {
+    echo "[DEBUG] Starting multi job analysis with limit: ${LIMIT:-10}"
+  local limit="${LIMIT:-10}"
 
-  case "$choice" in
-    "Estimate"*)  MODE="estimate" ;;
-    "Get real"*)  MODE="explorer" ;;
-    *)            exit 0 ;;
-  esac
+  echo ""
+  header "Multi Job Analysis for Queue: $JOB_QUEUE (Limit: $limit)"
+  echo ""
+
+  local total_cost=0
+  local max_cost=0
+  local count=0
+
+  local job_ids
+  job_ids=$(aws_list_jobs "$limit")
+
+  if [[ -z "$job_ids" ]]; then
+    err "Keine Jobs gefunden (Queue: $JOB_QUEUE)"
+  fi
+
+  echo "[DEBUG] Job IDs fetched:"
+  echo "$job_ids"
+
+  for job_id in $job_ids; do
+    local job_data duration_sec vcpu memory_mb total
+
+    job_data=$(aws_describe_multi_job "$job_id")
+
+    duration_sec=$(echo "$job_data" | jq -r '.duration_sec')
+    vcpu=$(echo "$job_data" | jq -r '.vcpu')
+    memory_mb=$(echo "$job_data" | jq -r '.memory_mb')
+
+    echo "[DEBUG] job_id=$job_id"
+    echo "[DEBUG] duration=$duration_sec vcpu=$vcpu mem=$memory_mb"
+
+    # skip invalid
+    if [[ "$duration_sec" == "null" || -z "$duration_sec" ]]; then
+      continue
+    fi
+
+    duration_sec=$(sanitize_duration "$duration_sec")
+
+    IFS="|" read -r _ _ total _ \
+      <<< "$(calc_cost_raw "$duration_sec" "$vcpu" "$memory_mb")"
+
+    total_cost=$(echo "$total_cost + $total" | bc)
+
+    if (( $(echo "$total > $max_cost" | bc -l) )); then
+      max_cost="$total"
+    fi
+
+    count=$((count + 1))
+  done
+
+  echo "[DEBUG] Jobs analyzed: $count"
+
+  if [[ "$count" -eq 0 ]]; then
+    err "Keine validen Jobs gefunden"
+  fi
+
+  local avg_cost
+  avg_cost=$(echo "scale=4; $total_cost / $count" | bc)
+
+  separator
+  label "Jobs analyzed" "$count"
+  separator
+  cost_line "Total Cost" "$(format_float "$total_cost")"
+  cost_line "Average"    "$(format_float "$avg_cost")"
+  cost_line "Max Job"    "$(format_float "$max_cost")"
+
+  echo ""
 }
 
-# --- Main ---
-MODE="" JOB_ID="" JOB_NAME=""
-
-check_deps
-parse_args "$@"
-load_provider
-
-if [[ -z "$MODE" ]]; then
-  interactive_mode
-fi
-
-case "$MODE" in
-  estimate) mode_estimate ;;
-  explorer) mode_explorer ;;
-  *)        usage; exit 1 ;;
+case "$1" in
+  --last)
+    LIMIT="$2"
+    mode_multi
+    ;;
+  *)
+    mode_estimate "$1"
+    ;;
 esac

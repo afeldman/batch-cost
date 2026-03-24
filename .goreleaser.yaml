@@ -16,12 +16,31 @@ before:
     - go generate ./...
 
 builds:
-  - env:
+  - id: batch-cost
+    binary: batch-cost
+    env:
       - CGO_ENABLED=0
     goos:
       - linux
-      - windows
       - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+  # Windows ohne lokalen LLM-Support (Python-Subprocess)
+  - id: batch-cost-windows
+    binary: batch-cost
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
 
 archives:
   - formats: [tar.gz]

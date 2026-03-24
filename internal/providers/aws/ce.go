@@ -10,7 +10,7 @@ import (
     awscfg "github.com/aws/aws-sdk-go-v2/aws"
     "github.com/aws/aws-sdk-go-v2/service/costexplorer"
     "github.com/aws/aws-sdk-go-v2/service/costexplorer/types"
-    "github.com/lynqtech/batch-cost/internal/providers"
+    "github.com/afeldman/batch-cost/internal/providers"
 )
 
 type ceClient struct {

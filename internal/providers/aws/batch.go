@@ -10,7 +10,7 @@ import (
     "github.com/aws/aws-sdk-go-v2/config"
     "github.com/aws/aws-sdk-go-v2/service/batch"
     "github.com/aws/aws-sdk-go-v2/service/batch/types"
-    "github.com/lynqtech/batch-cost/internal/providers"
+    "github.com/afeldman/batch-cost/internal/providers"
 )
 
 type AWSProvider struct {
