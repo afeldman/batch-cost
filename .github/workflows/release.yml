@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # goreleaser braucht die volle Git-Historie
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -24,7 +24,22 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+      - name: Install gotofish
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://raw.githubusercontent.com/afeldman/scripts/master/gotofish \
+            -o "$HOME/.local/bin/gotofish"
+          chmod +x "$HOME/.local/bin/gotofish"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Update fish-food
+        run: gotofish gen --release batch-cost --desc "AWS Batch job cost estimator"
+        env:
+          FISH_FOOD_TOKEN: ${{ secrets.FISH_FOOD_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
