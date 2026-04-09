@@ -50,20 +50,18 @@ changelog:
       - "^test:"
       - "^chore:"
 
-brews:
+homebrew_casks:
   - name: batch-cost
     repository:
       owner: afeldman
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: "https://github.com/afeldman/batch-cost"
     description: "AWS Batch job cost estimator"
     license: "Apache-2.0"
-    install: |
-      bin.install "batch-cost"
-    test: |
-      system "#{bin}/batch-cost", "--version"
+    binaries:
+      - batch-cost
     skip_upload: auto
 
 release:
