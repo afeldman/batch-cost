@@ -30,16 +30,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
-      - name: Install gotofish
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSL https://raw.githubusercontent.com/afeldman/scripts/master/gotofish \
-            -o "$HOME/.local/bin/gotofish"
-          chmod +x "$HOME/.local/bin/gotofish"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Update fish-food
-        run: gotofish gen --release batch-cost --desc "AWS Batch job cost estimator"
-        env:
-          FISH_FOOD_TOKEN: ${{ secrets.FISH_FOOD_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+  update-fish-food:
+    needs: [release]
+    uses: afeldman/fish-food/.github/workflows/update-food.yml@master
+    with:
+      name: batch-cost
+      version: ${{ github.ref_name }}
+      description: "AWS Batch job cost estimator"
+      github_repo: afeldman/batch-cost
+    secrets:
+      fish_food_token: ${{ secrets.FISH_FOOD_TOKEN }}
