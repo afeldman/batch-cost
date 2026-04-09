@@ -6,24 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 )
 
-type LocalConfig struct {
-	Enabled   bool   `toml:"enabled"`
-	ModelRepo string `toml:"model_repo"`
-	Port      int    `toml:"port"`
-	ConfigDir string `toml:"config_dir"`
-}
-
 type Config struct {
-	Enabled  bool        `toml:"enabled"`
-	Endpoint string      `toml:"endpoint"`
-	Model    string      `toml:"model"`
-	APIKey   string      `toml:"api_key"`
-	TimeoutS int         `toml:"timeout_s"`
-	Local    LocalConfig `toml:"local"`
+	Enabled  bool   `toml:"enabled"`
+	Endpoint string `toml:"endpoint"`
+	Model    string `toml:"model"`
+	APIKey   string `toml:"api_key"`
+	TimeoutS int    `toml:"timeout_s"`
 }
 
 type Client struct {
@@ -32,16 +23,6 @@ type Client struct {
 }
 
 func New(cfg Config) *Client {
-	// Wenn lokaler Modus aktiviert ist, Endpoint und Model automatisch setzen
-	if cfg.Local.Enabled {
-		cfg.Endpoint = fmt.Sprintf("http://localhost:%d/v1", cfg.Local.Port)
-		// Model auf Basename von ModelRepo setzen
-		parts := strings.Split(cfg.Local.ModelRepo, "/")
-		if len(parts) > 0 {
-			cfg.Model = parts[len(parts)-1]
-		}
-	}
-	
 	return &Client{
 		cfg:  cfg,
 		http: &http.Client{Timeout: time.Duration(cfg.TimeoutS) * time.Second},

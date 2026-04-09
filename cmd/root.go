@@ -87,34 +87,12 @@ func run(cmd *cobra.Command, args []string) error {
     })
     if err != nil {
         return fmt.Errorf("resolve prices: %w", err)
-    }
-    pricingCfg = raw.(pricing.Config)
+	}
+	pricingCfg = raw.(pricing.Config)
 
-    // 3. Lokalen LLM-Server verbinden oder starten (als Daemon)
-    if llmCfg.Local.Enabled {
-        mgr := llm.NewManager(llmCfg.Local)
 
-        if mgr.IsHealthy() {
-            // Server läuft bereits — sofort nutzen, nicht beenden
-            llmCfg.Endpoint = fmt.Sprintf("http://localhost:%d/v1", llmCfg.Local.Port)
-            llmCfg.Model = llmCfg.Local.ModelRepo
-        } else {
-            // Server starten (Daemon — bleibt nach batch-cost laufen)
-            _, err := ui.RunWithSpinner("LLM-Server starten (einmalig ~60s)...", func() (interface{}, error) {
-                return nil, mgr.StartDaemon(ctx)
-            })
-            if err != nil {
-                ui.Warn("LLM nicht verfügbar: " + err.Error())
-                llmCfg.Enabled = false
-            } else {
-                llmCfg.Endpoint = fmt.Sprintf("http://localhost:%d/v1", llmCfg.Local.Port)
-                llmCfg.Model = llmCfg.Local.ModelRepo
-            }
-        }
-    }
-
-    // 4. Provider
-    provider, err := awsprovider.New(flagRegion, flagProfile)
+	// 4. Provider
+	provider, err := awsprovider.New(flagRegion, flagProfile)
     if err != nil {
         return fmt.Errorf("provider: %w", err)
     }

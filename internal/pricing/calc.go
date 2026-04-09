@@ -58,12 +58,6 @@ func LoadOptions(path string) (Config, PricingOptions, llm.Config, error) {
 		Model:    "",
 		APIKey:   "lm-studio",
 		TimeoutS: 30,
-		Local: llm.LocalConfig{
-			Enabled:   false,
-			ModelRepo: "noeum/noeum-1-nano-base",
-			Port:      2510,
-			ConfigDir: "",
-		},
 	}
 
 	// Env-Vars für Preise
